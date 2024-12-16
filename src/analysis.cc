@@ -279,7 +279,18 @@ void print_GPU_mem_really_in_use() {
  */
 void scheduling_movement_hints() {
   // TODO: fill the data structure "std::vector<TensorMovementHint> movement_hints" with your own hints!
-
+  for (int i = 0; i < kernel_list.size(); i++) {
+    std::vector<Tensor*> r;
+    kernel_list[i].getRequiredTensors(r);
+    for (int j = 0; j < r.size(); j++) {
+      if (kernel_list[i].kernel_id > 0)
+      {
+        std::cout << "Add hint current kernel " << kernel_list[i].kernel_id << " tensor " << r[j]->tensor_id << std::endl;
+        TensorMovementHint* hint = new TensorMovementHint(TensorLocation::NOT_KNOWN, TensorLocation::IN_GPU, kernel_list[i].kernel_id - 1, r[j]);
+        movement_hints.push_back(*hint);
+      }        
+    }
+  }
 
   // make sure the movement hints are sorted, the simulator depends on this
   std::sort(movement_hints.begin(), movement_hints.end());
