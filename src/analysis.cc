@@ -159,7 +159,28 @@ void tensor_first_pass_liveness_analysis() {
     // TODO: complete liveness analysis
     if (!current_tensor->is_global_weight) {
       // This tensor is intermediate
-
+      for(CUDAKernel kern : kernel_list) {
+        for(Tensor *input : kern.inputs) {
+          if(input->tensor_id == current_tensor->tensor_id) {
+            if(current_tensor->live_interval.first == -1 || current_tensor->live_interval.first > kern.kernel_id) {
+              current_tensor->live_interval.first = kern.kernel_id;
+            }
+            if(current_tensor->live_interval.second < kern.kernel_id) {
+              current_tensor->live_interval.second = kern.kernel_id;
+            }
+          }
+        }
+        for(Tensor *output : kern.outputs) {
+          if(output->tensor_id == current_tensor->tensor_id) {
+            if(current_tensor->live_interval.first == -1 || current_tensor->live_interval.first > kern.kernel_id) {
+              current_tensor->live_interval.first = kern.kernel_id;
+            }
+            if(current_tensor->live_interval.second < kern.kernel_id) {
+              current_tensor->live_interval.second = kern.kernel_id;
+            }
+          }
+        }
+      }
     }
     // global tensors do not need this info
   }
@@ -189,10 +210,43 @@ void tensor_second_pass_interval_formation() {
     // TODO: complete inactive period analysis
     if (!current_tensor->is_global_weight) {
       // This tensor is intermediate
+      bool begun_interval = false;
+      InactivePeriod * cur_per;
+      for(CUDAKernel kern : kernel_list) {
+        std::unordered_set<Tensor*> inputs = kern.inputs;
+        std::unordered_set<Tensor*> outputs = kern.outputs;  
+
+        if(!begun_interval){
+          // If not found we need to start the interval
+          if(std::find(inputs.begin(), inputs.end(), current_tensor) == inputs.end() && std::find(outputs.begin(), outputs.end(), current_tensor) == outputs.end()){
+            begun_interval = true;
+            cur_per = new InactivePeriod(current_tensor);
+            cur_per->kernelLevel_interval.first = kern.kernel_id;
+          }
+        } else {
+          // If found we need to end the interval
+          if(std::find(inputs.begin(), inputs.end(), current_tensor) != inputs.end() || std::find(outputs.begin(), outputs.end(), current_tensor) != outputs.end()){
+            cur_per->kernelLevel_interval.second = kern.kernel_id;
+            begun_interval = false; // We are done with this interval
+            current_tensor->inactive_periods.push_back(cur_per);
+          }
+        }
+      }
+      
+      // We have reached the end of the Trace during the current interval
+      if(begun_interval){
+        cur_per->kernelLevel_interval.second = kernel_list[kernel_list.size()-1].kernel_id+1;
+        current_tensor->inactive_periods.push_back(cur_per);
+      }
+      begun_interval = false;
 
     } else {
       // This tensor is global
-
+      InactivePeriod * p  = new InactivePeriod(current_tensor);
+      p->kernelLevel_interval.first = 0;
+      p->kernelLevel_interval.second = -1;
+      p->is_looped = true;
+      current_tensor->inactive_periods.push_back(p);
     }
   }
 }
