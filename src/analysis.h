@@ -48,7 +48,9 @@ const std::unordered_map<std::string, CUDAKernelType> kernel_type_revmap = []() 
     }
     return ret;
 }();
-
+enum Eviction_P {
+    Hot, Medium, Cold, Dead, Invalid
+};
 
 class InactivePeriod;
 class Tensor {
@@ -62,12 +64,20 @@ class Tensor {
         void print() const;
         void print_liveness();
         void print_inactive_periods();
+        void print_requiredByKernel();
 
         int tensor_id;
         long long size_in_byte;  //Aligned with 4KB
         long long raw_size_byte;
         long long address_offset;
         bool is_global_weight;   // If the tensor is a global tensor.
+
+        double access_count;
+        Eviction_P hotness;
+        double heuristic;
+        std::set<uint64_t> addrs_in_GPU;
+        std::set<int> requiredByKernels; // use as input or output of a list of kernels 
+        double estimate_wait_time;
 
         // Following is the assess pattern information, which is not automatically filled with the model graph input.
 
@@ -105,10 +115,6 @@ class InactivePeriod {
 
     InactivePeriod(Tensor* t) : is_looped(false), tensor_back_ptr(t) {};
     void print();
-};
-
-enum Eviction_P {
-    Hot, Medium, Cold, Dead, Invalid
 };
 
 const std::string print_eviction_array [4] = {
@@ -167,6 +173,9 @@ void tensor_first_pass_liveness_analysis();
 
 //TODO:
 void tensor_second_pass_interval_formation();
+
+void tensor_third_pass_requiredByKernel_formation();
+
 
 //Provided
 void get_inactive_periods_time();

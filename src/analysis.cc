@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <iomanip>
 
 #include "ast.h"
 #include "simulationUtils.h"
@@ -46,6 +47,7 @@ std::vector<CUDAKernel> kernel_list;
 std::vector<InactivePeriod *> inactive_periods_list;
 
 std::vector<double> kernel_time_table;
+
 std::vector<EvictionGuideEntry> EvictionGuideTable;
 std::vector<long> GPU_resident_memory_estimation;
 std::vector<long> CPU_resident_memory_estimation;
@@ -262,6 +264,27 @@ void Tensor::print_inactive_periods() {
   std::cout << "_______________________________________________________________" << std::endl;
 }
 
+// compute more accurate inactive period
+void tensor_third_pass_requiredByKernel_formation() {
+  for (auto k : kernel_list){
+    std::vector<Tensor*> r;
+    k.getRequiredTensors(r);
+    for (auto t : r){
+      t->requiredByKernels.insert(k.kernel_id);
+    }
+  }
+}
+
+void Tensor::print_requiredByKernel() {
+  // print();
+  std::cout << "Required by Kernel ID:" << std::endl;
+  for (int kernelID : requiredByKernels) {
+    std::cout << " " << kernelID;
+  }
+  std::cout << std::endl;
+}
+
+
 // A provided compiler pass to calculate the estimated execution time for every
 // tensors' inactive period length(time)
 void get_inactive_periods_time() {
@@ -273,6 +296,7 @@ void get_inactive_periods_time() {
   for (int i = 0; i < kernel_num; i++) {
     time += (double)kernel_list[i].execution_cycles / (double)(GPU_frequency_GHz * 1000);
     kernel_time_table.push_back(time);
+    std::cout << "Kernel" << i << " estimated to start at time " << std::fixed << std::setprecision(6) << time << std::endl;
   }
 
   // Fill the looped extend kernel time table      0 - 2 * kernel_num
@@ -288,21 +312,21 @@ void get_inactive_periods_time() {
     kernel_time_table_extended.push_back(last_time);
   }
 
-  for (int i = 0; i < inactive_periods_list.size(); i++) {
-    if (!inactive_periods_list[i]->is_looped) {
-      assert(inactive_periods_list[i]->kernelLevel_interval.second >
-             inactive_periods_list[i]->kernelLevel_interval.first);
-      inactive_periods_list[i]->time_estimated =
-          kernel_time_table[inactive_periods_list[i]->kernelLevel_interval.second] -
-          kernel_time_table[inactive_periods_list[i]->kernelLevel_interval.first];
-    } else {
-      assert(inactive_periods_list[i]->kernelLevel_interval.second <
-             inactive_periods_list[i]->kernelLevel_interval.first);
-      int end = inactive_periods_list[i]->kernelLevel_interval.second;
-      int start = inactive_periods_list[i]->kernelLevel_interval.first;
-      end += kernel_num;
-      inactive_periods_list[i]->time_estimated =
-          kernel_time_table_extended[end] - kernel_time_table_extended[start];
+  for (int i = 0; i < tensor_list.size(); i++) {
+    for (auto ip : tensor_list[i]->inactive_periods){
+      if (!ip->is_looped) {
+        assert(ip->kernelLevel_interval.second > ip->kernelLevel_interval.first);
+        ip->time_estimated = kernel_time_table[ip->kernelLevel_interval.second] - kernel_time_table[ip->kernelLevel_interval.first];
+      } else {
+        /* Joey TODO : change kernel interval of global tensor
+        assert(ip->kernelLevel_interval.second < ip->kernelLevel_interval.first);
+        int end = ip->kernelLevel_interval.second;
+        int start = ip->kernelLevel_interval.first;
+        end += kernel_num;
+        ip->time_estimated = kernel_time_table_extended[end] - kernel_time_table_extended[start];
+         */
+        ip->time_estimated = 0;
+      }
     }
   }
 }
@@ -332,6 +356,7 @@ void print_GPU_mem_really_in_use() {
  * @brief fill this function to schedule your movement hints
  */
 void scheduling_movement_hints() {
+  const long long size_512MB = 512 * 1024 * 1024;
   // TODO: fill the data structure "std::vector<TensorMovementHint> movement_hints" with your own hints!
   for (int i = 0; i < kernel_list.size(); i++) {
     std::vector<Tensor*> r;
@@ -340,9 +365,22 @@ void scheduling_movement_hints() {
       if (kernel_list[i].kernel_id > 0)
       {
         std::cout << "Add hint current kernel " << kernel_list[i].kernel_id << " tensor " << r[j]->tensor_id << std::endl;
-        TensorMovementHint* hint = new TensorMovementHint(TensorLocation::NOT_KNOWN, TensorLocation::IN_GPU, kernel_list[i].kernel_id - 1, r[j]);
-        movement_hints.push_back(*hint);
+        if (r[j]->size_in_byte > size_512MB && kernel_list[i].kernel_id > 1) {
+          TensorMovementHint* hint = new TensorMovementHint(TensorLocation::NOT_KNOWN, TensorLocation::IN_GPU, kernel_list[i].kernel_id - 2, r[j]);
+          movement_hints.push_back(*hint);
+        }
+        else {
+          TensorMovementHint* hint = new TensorMovementHint(TensorLocation::NOT_KNOWN, TensorLocation::IN_GPU, kernel_list[i].kernel_id - 1, r[j]);
+          movement_hints.push_back(*hint);
+        }        
       }        
+    }
+
+    for (Tensor* t : tensor_list)
+    {
+      if (kernel_list[i].kernel_id == t->live_interval.second)
+        TensorMovementHint* hint = new TensorMovementHint(TensorLocation::IN_GPU, TensorLocation::NOT_PRESENT, kernel_list[i].kernel_id + 1, t);
+
     }
   }
 

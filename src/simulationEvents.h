@@ -101,6 +101,7 @@ class KernelBeginEvent : public Event {
      *        a simulated time delay.
      */
     void execute(vector<Event *> &created_events);
+    void prepareEvictInfo();
 
     // the cuda kernel that is processed in this event
     const CUDAKernel *kernel;

@@ -1,3 +1,4 @@
+#include <iostream>
 #include <queue>
 #include <regex>
 #include <math.h>
@@ -227,8 +228,11 @@ bool GPUPageTable::exist(Addr vpn) {
 }
 
 bool GPUPageTable::allocPTE(Addr vpn) {
-  if (page_table.find(vpn) != page_table.end())
+  if (page_table.find(vpn) != page_table.end()){
+    searchTensorForPage(vpn)->access_count++;
     return true;
+  }
+  
   if (phys_page_avail.size() == 0)
     return false;
   Addr ppn = *phys_page_avail.begin();
@@ -236,6 +240,8 @@ bool GPUPageTable::allocPTE(Addr vpn) {
   GPUPageTableEntry &entry = page_table[vpn];
   entry.ppn = ppn;
   entry.alloced_no_arrival = true;
+  searchTensorForPage(vpn)->access_count++;
+  searchTensorForPage(vpn)->addrs_in_GPU.insert(vpn);
   assert(phys_page_avail.size() + page_table.size() == total_memory_pages);
   LRUAccess(vpn);
   return true;
@@ -252,6 +258,7 @@ void GPUPageTable::erasePTE(Addr vpn) {
     return;
   assert(page_table[vpn].alloced_no_arrival == false);
   Addr ppn = page_table[vpn].ppn;
+  searchTensorForPage(vpn)->addrs_in_GPU.erase(vpn);
   page_table.erase(vpn);
   phys_page_avail.insert(ppn);
   assert(phys_page_avail.size() + page_table.size() == total_memory_pages);
@@ -274,6 +281,60 @@ tuple<Addr, GPUPageTable::GPUPageTableEntry, TensorLocation, GPUPageTable::Evict
   // GPU memory is full, eviction required
   tuple<Addr, GPUPageTable::GPUPageTableEntry, TensorLocation, EvictCandidate> evicted_entry;
   switch (policy) {
+    case EvcPolicy::HEURISTIC: {
+      while (sim_sys->tensor_evict_heuristic_pq.top()->addrs_in_GPU.empty())
+      {
+        std::cout << "All addrs of tensor" << sim_sys->tensor_evict_heuristic_pq.top()->tensor_id << " is evicted" << std::endl;
+        sim_sys->tensor_evict_heuristic_pq.pop();
+      }
+      Tensor* candidate_tensor = sim_sys->tensor_evict_heuristic_pq.top();
+      
+      EvictCandidate &ret_candidate = get<3>(evicted_entry);
+      ret_candidate.vpn = *candidate_tensor->addrs_in_GPU.begin();
+      candidate_tensor->addrs_in_GPU.erase(ret_candidate.vpn);
+      ret_candidate.tensor = searchTensorForPage(ret_candidate.vpn);
+      ret_candidate.hotness = Eviction_P::Invalid;
+      ret_candidate.exact_hotness = Eviction_P::Invalid;
+      
+      get<0>(evicted_entry) = ret_candidate.vpn;
+      get<1>(evicted_entry) = page_table[ret_candidate.vpn];
+      if (candidate_tensor->hotness == Eviction_P::Dead) {
+        get<2>(evicted_entry) = NOT_PRESENT;
+      } else if (candidate_tensor->addrs_in_GPU.size() > sim_sys->CPU_PT.phys_page_avail.size()/5 ) {
+        get<2>(evicted_entry) = IN_SSD;
+      } else {
+        get<2>(evicted_entry) = IN_CPU;
+      }
+      break;
+    }
+    case EvcPolicy::HOTNESS: {
+      while (sim_sys->tensor_evict_hotness_pq.top()->addrs_in_GPU.empty())
+      {
+        std::cout << "All addrs of tensor" << sim_sys->tensor_evict_hotness_pq.top()->tensor_id << " is evicted" << std::endl;
+        sim_sys->tensor_evict_hotness_pq.pop();
+      }
+      Tensor* candidate_tensor = sim_sys->tensor_evict_hotness_pq.top();
+      
+      EvictCandidate &ret_candidate = get<3>(evicted_entry);
+      ret_candidate.vpn = *candidate_tensor->addrs_in_GPU.begin();
+      candidate_tensor->addrs_in_GPU.erase(ret_candidate.vpn);
+      ret_candidate.tensor = searchTensorForPage(ret_candidate.vpn);
+      ret_candidate.hotness = candidate_tensor->hotness;
+      ret_candidate.exact_hotness = Eviction_P::Invalid;
+      //if (kernel_id == 36) std::cout << "Ret Tensor" << ret_candidate.tensor->tensor_id << " addr " << ret_candidate.vpn << std::endl;
+      get<0>(evicted_entry) = ret_candidate.vpn;
+      get<1>(evicted_entry) = page_table[ret_candidate.vpn];
+      if (ret_candidate.hotness == Dead) {
+        get<2>(evicted_entry) = NOT_PRESENT;
+      } else if (ret_candidate.hotness == Eviction_P::Hot) {
+        get<2>(evicted_entry) = IN_SSD;
+      } else if (ret_candidate.hotness == Eviction_P::Medium) {
+        get<2>(evicted_entry) = IN_CPU;
+      } else if (ret_candidate.hotness == Eviction_P::Cold) {
+        get<2>(evicted_entry) = IN_CPU;
+      }
+      break;
+    }
     case EvcPolicy::RANDOM: {
       // select random entry
       int bucket, bucket_size;

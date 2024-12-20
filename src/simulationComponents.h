@@ -1,6 +1,7 @@
 #ifndef __SIMULATION_COMPONENTS_H__
 #define __SIMULATION_COMPONENTS_H__
 
+#include <queue>
 #include <set>
 #include <map>
 #include <list>
@@ -14,6 +15,7 @@
 #include "analysis.h"
 #include "simulationUtils.h"
 
+using std::priority_queue;
 using std::set;
 using std::map;
 using std::pair;
@@ -25,6 +27,8 @@ using std::vector;
 using std::ofstream;
 using std::unordered_map;
 using std::unordered_set;
+
+
 
 namespace Simulator {
 
@@ -117,10 +121,10 @@ class CPUPageTable {
 
     // report the current status of the CPU PT
     void report();
+    unordered_set<Addr> phys_page_avail;
 
   private:
     unordered_map<Addr, CPUPageTableEntry> page_table;
-    unordered_set<Addr> phys_page_avail;
 
     unordered_set<Addr> in_transfer_pages;
 
@@ -131,7 +135,7 @@ class CPUPageTable {
 
 class GPUPageTable {
   public:
-    enum EvcPolicy { RANDOM, LRU, GUIDED, DEEPUM };
+    enum EvcPolicy { RANDOM, LRU, GUIDED, DEEPUM, HOTNESS, HEURISTIC };
     class GPUPageTableEntry {
       public:
         Addr ppn;
@@ -150,15 +154,15 @@ class GPUPageTable {
 
     struct EvictCandidateComp {
       bool operator()(const EvictCandidate &lhs, const EvictCandidate &rhs) const {
-        return lhs.hotness > rhs.hotness;
+        return lhs.hotness < rhs.hotness;
       }
     };
 
     struct EvictCandidatePerfectComp {
       bool operator()(const EvictCandidate &lhs, const EvictCandidate &rhs) const {
-        if (lhs.hotness == Eviction_P::Dead) return 1;
-        if (rhs.hotness == Eviction_P::Dead) return 0;
-        return lhs.exact_hotness < rhs.exact_hotness;
+        if (lhs.hotness == Eviction_P::Dead) return 0;
+        if (rhs.hotness == Eviction_P::Dead) return 1;
+        return lhs.exact_hotness > rhs.exact_hotness;
       }
     };
 
@@ -174,6 +178,8 @@ class GPUPageTable {
 
     bool isFull();
 
+    int hotness_candidates_last_kernel;
+    priority_queue<EvictCandidate, vector<EvictCandidate>, EvictCandidateComp> hotness_candidates;
     tuple<Addr, GPUPageTableEntry, TensorLocation, EvictCandidate>
         selectEvictPTE(int kernel_id, bool is_pf);
 
@@ -186,6 +192,8 @@ class GPUPageTable {
     void LRUUnpin(Addr addr);
 
     friend class System;
+    unordered_map<Addr, GPUPageTableEntry> page_table; // vpn -> entry
+    std::set<int> tensors_in_pt;
 
   private:
     GPUPageTable();
@@ -194,7 +202,6 @@ class GPUPageTable {
     Addr LRUGetLeastUsed();
     size_t LRUGetLeastUsed(vector<Addr>& lrus, size_t size);
 
-    unordered_map<Addr, GPUPageTableEntry> page_table; // vpn -> entry
     set<Addr> phys_page_avail;    // ppn
     unordered_set<Addr> alloced_no_arrival; // vpn
 
@@ -327,6 +334,23 @@ class System {
     const double system_latency;
     const double SSD_latency;
 
+    struct TensorHeuristicComp {
+      bool operator()(const Tensor* lhs, const Tensor* rhs) const {
+        if (lhs->hotness == Eviction_P::Dead ) return 0;
+        else if (rhs->hotness == Eviction_P::Dead) return 1;
+        return lhs->heuristic < rhs->heuristic;
+      }
+    };
+
+    struct TensorHotnessComp {
+      bool operator()(const Tensor* lhs, const Tensor* rhs) const {
+        if (lhs->hotness == rhs->hotness) return lhs->addrs_in_GPU.size() > rhs->addrs_in_GPU.size();
+        return lhs->hotness < rhs->hotness;
+      }
+    };
+
+    priority_queue<Tensor*, vector<Tensor*>, TensorHotnessComp> tensor_evict_hotness_pq;
+    priority_queue<Tensor*, vector<Tensor*>, TensorHeuristicComp> tensor_evict_heuristic_pq;
     // hardware components
     // GPU MMU
     // GPUMMU GPU_MMU;

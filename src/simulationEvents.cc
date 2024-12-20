@@ -1,3 +1,4 @@
+#include <iostream>
 #include <math.h>
 #include <unistd.h>
 
@@ -19,7 +20,7 @@ using Simulator::TensorLocation;
 extern vector<Tensor*> tensor_list;
 extern vector<CUDAKernel> kernel_list;
 extern vector<TensorMovementHint> movement_hints;
-
+extern vector<double> kernel_time_table;
 extern string output_folder_name;
 
 namespace Simulator {
@@ -289,7 +290,84 @@ bool KernelBeginEvent::shouldExecute() {
   return sim_sys->getCurrentIteration() < sim_sys->getMaxIteration();
 }
 
+void KernelBeginEvent::prepareEvictInfo(){
+  if (sim_sys->evc_policy == GPUPageTable::EvcPolicy::HOTNESS) 
+    while(!sim_sys->tensor_evict_hotness_pq.empty()) sim_sys->tensor_evict_hotness_pq.pop();
+  else if (sim_sys->evc_policy == GPUPageTable::EvcPolicy::HEURISTIC) 
+    while(!sim_sys->tensor_evict_heuristic_pq.empty()) sim_sys->tensor_evict_heuristic_pq.pop();
+  
+  sim_sys->GPU_PT.tensors_in_pt.clear();
+  for (auto t : tensor_list){
+    if (!t->addrs_in_GPU.empty())
+      sim_sys->GPU_PT.tensors_in_pt.insert(t->tensor_id);
+    
+  }
+
+  std::vector<Tensor*> cur_required_tensor;
+  kernel->getRequiredTensors(cur_required_tensor);
+  for (auto t : cur_required_tensor) sim_sys->GPU_PT.tensors_in_pt.erase(t->tensor_id);
+
+  for (int tid : sim_sys->GPU_PT.tensors_in_pt) {
+    Tensor* tensor_candidate = tensor_list[tid];
+    auto it = tensor_candidate->requiredByKernels.upper_bound(kernel->kernel_id);
+    if (tensor_candidate->is_global_weight && it == tensor_candidate->requiredByKernels.end()){
+      double cur_iter_time = (kernel_time_table[kernel_time_table.size()-1] - kernel_time_table[kernel->kernel_id]);
+      double next_iter_time = kernel_time_table[(*tensor_candidate->requiredByKernels.begin())];
+      tensor_candidate->estimate_wait_time = cur_iter_time + next_iter_time;
+    }
+    else if (it == tensor_candidate->requiredByKernels.end() ){
+      tensor_candidate->estimate_wait_time = kernel_time_table[kernel_time_table.size()-1] - kernel_time_table[kernel->kernel_id];
+    }
+    else {
+      tensor_candidate->estimate_wait_time = kernel_time_table[(*it)] - kernel_time_table[kernel->kernel_id];
+      if (*it - kernel->kernel_id == 1) tensor_candidate->estimate_wait_time = tensor_candidate->estimate_wait_time/1000000;
+      if (*it - kernel->kernel_id == 2) tensor_candidate->estimate_wait_time = tensor_candidate->estimate_wait_time/100;
+    }
+
+    tensor_candidate->hotness = Eviction_P::Hot;
+    tensor_candidate->heuristic = tensor_candidate->estimate_wait_time/tensor_candidate->size_in_byte;
+    if (tensor_candidate->is_global_weight){
+      tensor_candidate->hotness = Eviction_P::Hot;
+      std::cout << "\tTensor" << tensor_candidate->tensor_id << " Hot " << tensor_candidate->estimate_wait_time/tensor_candidate->size_in_byte*4096 <<std::endl;
+    }
+    else if ((kernel->kernel_id > tensor_candidate->live_interval.second && tensor_candidate->live_interval.second >= 0) || kernel->kernel_id < tensor_candidate->live_interval.first-2)
+    {
+      tensor_candidate->hotness = Eviction_P::Dead;
+      std::cout << "\tTensor" << tensor_candidate->tensor_id << " Dead " << tensor_candidate->estimate_wait_time/tensor_candidate->size_in_byte*4096 << std::endl;
+    }
+    else{
+      for (int i = 0; i < tensor_candidate->inactive_periods.size(); i++)
+      {
+        InactivePeriod* inactive_period = tensor_candidate->inactive_periods[i];
+        if (kernel->kernel_id >= inactive_period->kernelLevel_interval.second)
+          continue;
+        else if (kernel->kernel_id <= inactive_period->kernelLevel_interval.first) {// still active
+          tensor_candidate->hotness = Eviction_P::Hot;
+          std::cout << "\tTensor" << tensor_candidate->tensor_id << " Hot " << tensor_candidate->estimate_wait_time/tensor_candidate->size_in_byte*4096 << std::endl;
+          break;
+        }
+        else { // in an inactive period
+          tensor_candidate->hotness = Eviction_P::Cold;
+          std::cout << "\tTensor" << tensor_candidate->tensor_id << " Cold " << tensor_candidate->estimate_wait_time/tensor_candidate->size_in_byte*4096 << std::endl;
+          break;
+        }
+      }
+    }
+
+    
+
+    if (sim_sys->evc_policy == GPUPageTable::EvcPolicy::HOTNESS) 
+      sim_sys->tensor_evict_hotness_pq.emplace(tensor_candidate);
+    else if (sim_sys->evc_policy == GPUPageTable::EvcPolicy::HEURISTIC)
+      sim_sys->tensor_evict_heuristic_pq.emplace(tensor_candidate);
+  }
+  if (!sim_sys->tensor_evict_hotness_pq.empty())std::cout << "Top is Tensor" << sim_sys->tensor_evict_hotness_pq.top()->tensor_id << std::endl;
+  if (!sim_sys->tensor_evict_heuristic_pq.empty())std::cout << "Top is Tensor" << sim_sys->tensor_evict_heuristic_pq.top()->tensor_id << std::endl;
+}
+
 void KernelBeginEvent::execute(vector<Event *> &created_events) {
+  if (sim_sys->evc_policy == GPUPageTable::EvcPolicy::HOTNESS || sim_sys->evc_policy == GPUPageTable::EvcPolicy::HEURISTIC)
+    prepareEvictInfo();
   // print facilities
   sim_sys->batcher_evt_print_current = 0;
   // change executing kernel if informed
