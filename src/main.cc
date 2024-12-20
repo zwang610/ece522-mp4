@@ -406,6 +406,10 @@ int main(int argc, char *argv[]) {
             eviction_policy = Simulator::GPUPageTable::EvcPolicy::GUIDED;
         } else if (eviction_policy_str == "DEEPUM") {
             eviction_policy = Simulator::GPUPageTable::EvcPolicy::DEEPUM;
+        } else if (eviction_policy_str == "HOTNESS") {
+            eviction_policy = Simulator::GPUPageTable::EvcPolicy::HOTNESS;
+        } else if (eviction_policy_str == "HEURISTIC") {
+            eviction_policy = Simulator::GPUPageTable::EvcPolicy::HEURISTIC;
         } else {
             wprintf("Defaulting eviction policy to be LRU\n", "");
             eviction_policy = Simulator::GPUPageTable::EvcPolicy::LRU;
@@ -493,6 +497,7 @@ int main(int argc, char *argv[]) {
 
         tensor_first_pass_liveness_analysis();
         tensor_second_pass_interval_formation();
+        tensor_third_pass_requiredByKernel_formation();
         get_inactive_periods_time();
 
         // life cycle info
